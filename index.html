@@ -896,7 +896,7 @@ textarea.notes-ta:focus{border-color:var(--accent);}
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.39.0/dist/umd/supabase.js"></script>
 <script>
 // -- CACHE BUST -------------------------------------------------
-const APP_VERSION = 'replog-STAGING-v49';
+const APP_VERSION = 'replog-STAGING-v50';
 if('serviceWorker' in navigator){
   navigator.serviceWorker.getRegistrations().then(regs=>{
     regs.forEach(reg=>{
@@ -1833,7 +1833,7 @@ function renderToday(){
       <div class="pc-bar-wrap"><div class="pc-pct">${pct}%</div><div class="pc-track"><div class="pc-fill" style="width:${pct}%"></div></div></div>
     </div>
     <div class="session-progress">
-      <div class="sp-row"><div class="sp-label">Session progress</div><div class="sp-count">${doneSets} / ${totalSets} sets</div></div>
+      <div class="sp-row"><div class="sp-label">Session progress</div><div style="display:flex;align-items:center;gap:10px;"><div class="session-clock" id="sessionClock" style="font-family:'Barlow Condensed',sans-serif;font-size:14px;font-weight:700;color:var(--muted);">⏱ 0:00</div><div class="sp-count">${doneSets} / ${totalSets} sets</div></div></div>
       <div class="sp-track"><div class="sp-fill" id="spFill" style="width:${pct}%"></div></div>
     </div>`;
 
@@ -1854,6 +1854,8 @@ function renderToday(){
   html+=`<div class="notes-wrap"><div class="notes-lbl">Session notes</div><textarea class="notes-ta" id="sessionNotes" placeholder="How did it feel? Any PRs? Notes on form…" onblur="autoSave()">${saved.notes||''}</textarea></div>`;
   if(!isComplete) html+=`<button class="save-btn" onclick="saveWithFeedback(this)">Save progress</button><div id="saveConfirm" style="display:none;text-align:center;font-family:'Barlow Condensed',sans-serif;font-size:14px;color:var(--accent2);margin-top:8px;">✓ Session saved</div>`;
   content.innerHTML=html;
+  // Resume the session clock if one is already running for this day
+  if(!isComplete) resumeSessionClockIfRunning(); else stopSessionClock();
 }
 
 function renderExBlock(ex, ei, saved){
@@ -1870,6 +1872,7 @@ function renderExBlock(ex, ei, saved){
   const pillText=allDone?`${savedSets.length}/${savedSets.length} ✓`:doneCount>0?`${doneCount}/${savedSets.length}`:'';
 
   const info = getExerciseInfo(ex.name);
+  const lastWeights = isBW ? null : getLastSetWeights(ex.name);
   const infoBtn = info ? `<button class="ex-info-btn" onclick="event.stopPropagation();toggleInfo(${ei})" title="How to do this exercise">i</button>` : '';
   const infoPanel = info ? `<div class="ex-info-panel" id="info-${ei}">
     <div class="eip-muscles">${info.muscles}</div>
@@ -1885,21 +1888,15 @@ function renderExBlock(ex, ei, saved){
     </div>
     ${infoPanel}
     <div class="ex-body">`;
-  if(prevBest) b+=`<div class="prev-best">Last best: <span>${prevBest}</span></div>`;
   b+=`<div class="set-hds"><div class="set-hd"></div><div class="set-hd">${colLabel}</div><div class="set-hd">${isBW?'BW':weightLabel()}</div><div class="set-hd">&#10003;</div></div>
     <div id="sets-${ei}">`;
   savedSets.forEach((s,si)=>{
-    b+=`<div class="set-row"><div class="sn">${si+1}</div><input class="si" type="number" value="${s.reps}" placeholder="-" min="0" onblur="autoSave()"><input class="si" type="number" value="${s.weight}" placeholder="${isBW?'BW':weightLabel()}" min="0" ${isBW?'disabled':''} onblur="autoSave()"><div class="sc ${s.done?'done':'undone'}" onclick="event.stopPropagation();toggleDone(${ei},${si},this)">${s.done?'✓':''}</div></div>`;
+    const lastW = lastWeights && lastWeights[si] ? lastWeights[si] : '';
+    const weightPlaceholder = lastW ? `last: ${lastW}` : (isBW?'BW':weightLabel());
+    b+=`<div class="set-row"><div class="sn">${si+1}</div><input class="si" type="number" value="${s.reps}" placeholder="-" min="0" onblur="autoSave()"><input class="si" type="number" value="${s.weight}" placeholder="${weightPlaceholder}" min="0" ${isBW?'disabled':''} onblur="autoSave()"><div class="sc ${s.done?'done':'undone'}" onclick="event.stopPropagation();toggleDone(${ei},${si},this)">${s.done?'✓':''}</div></div>`;
   });
   b+=`</tbody>
     <button class="add-set-btn" onclick="addSet(${ei},event)">+ Add set</button>
-    <div class="rest-row">
-      <div class="rest-lbl">Rest</div>
-      <div class="rchip" onclick="launchRestTimer(60)">1 min</div>
-      <div class="rchip" onclick="launchRestTimer(90)">90s</div>
-      <div class="rchip" onclick="launchRestTimer(120)">2 min</div>
-      <div class="rchip" onclick="launchRestTimer(180)">3 min</div>
-    </div>
   </div></div>`;
   return b;
 }
@@ -1966,6 +1963,38 @@ function getPrevBest(exName){
     }catch(e){}
   });
   return best?`${best.weight} lb × ${best.reps}`:null;
+}
+
+// Get last session's per-set weights for a specific exercise (matched by name within day plans)
+function getLastSetWeights(exName){
+  const keys=Object.keys(localStorage)
+    .filter(k=>k.startsWith('rl_session_'))
+    .map(k=>k.replace('rl_',''))
+    .sort()
+    .reverse(); // most recent dates first
+
+  const todayKey = getSessionKey(currentDate).replace('rl_','');
+
+  for(const key of keys){
+    if(key === todayKey) continue; // skip today's own session
+    try{
+      const session=lsGet(key);
+      if(!session||!session.sets) continue;
+      // Find which day plan this session belongs to
+      const dateStr = key.replace('session_','');
+      const dow = new Date(dateStr+'T12:00:00').getDay();
+      const dayPlan = activeProgram && activeProgram.days.find(d=>d.day_of_week===dow);
+      if(!dayPlan||!dayPlan.exercises) continue;
+      const exIdx = dayPlan.exercises.findIndex(e=>e.name===exName);
+      if(exIdx===-1) continue;
+      const exSets = session.sets[exIdx];
+      if(!Array.isArray(exSets)) continue;
+      // Only return if there's actual logged weight data
+      const hasData = exSets.some(s=>s.weight&&s.weight!=='');
+      if(hasData) return exSets.map(s=>s.weight||'');
+    }catch(e){}
+  }
+  return null;
 }
 
 function getSessionSets(){
@@ -2414,6 +2443,19 @@ async function migratGuestDataToCloud(){
 
 function saveWithFeedback(btn){
   autoSave();
+  // Stop the session clock and record total duration
+  const clockKey = getSessionClockKey();
+  const startTime = lsGet(clockKey);
+  if(startTime){
+    const durationMin = Math.round((Date.now() - startTime) / 60000);
+    const sessionKey = getSessionKey(currentDate);
+    const sessionData = lsGet(sessionKey);
+    if(sessionData){
+      sessionData.duration_min = durationMin;
+      lsSet(sessionKey, sessionData);
+    }
+    stopSessionClock();
+  }
   const confirm = document.getElementById('saveConfirm');
   if(confirm){
     confirm.style.display = 'block';
@@ -2429,11 +2471,57 @@ function saveWithFeedback(btn){
   }
 }
 
+// -- SESSION CLOCK ----------------------------------------------
+let sessionClockInterval = null;
+
+function getSessionClockKey(){
+  return 'clock_'+currentDate.toISOString().slice(0,10);
+}
+
+function startSessionClock(){
+  const key = getSessionClockKey();
+  let startTime = lsGet(key);
+  if(!startTime){
+    startTime = Date.now();
+    lsSet(key, startTime);
+  }
+  if(sessionClockInterval) clearInterval(sessionClockInterval);
+  updateSessionClock();
+  sessionClockInterval = setInterval(updateSessionClock, 1000);
+}
+
+function updateSessionClock(){
+  const el = document.getElementById('sessionClock');
+  if(!el) return;
+  const key = getSessionClockKey();
+  const startTime = lsGet(key);
+  if(!startTime){ el.textContent = '⏱ 0:00'; return; }
+  const elapsed = Math.floor((Date.now() - startTime) / 1000);
+  const h = Math.floor(elapsed/3600);
+  const m = Math.floor((elapsed%3600)/60);
+  const s = elapsed%60;
+  const timeStr = h>0 ? `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}` : `${m}:${String(s).padStart(2,'0')}`;
+  el.textContent = '⏱ ' + timeStr;
+  el.style.color = 'var(--accent2)';
+}
+
+function stopSessionClock(){
+  if(sessionClockInterval){ clearInterval(sessionClockInterval); sessionClockInterval = null; }
+}
+
+function resumeSessionClockIfRunning(){
+  const key = getSessionClockKey();
+  if(lsGet(key)) startSessionClock();
+}
+
 function autoSave(){
   const key=getSessionKey(currentDate);
   const notes=document.getElementById('sessionNotes');
   const data={sets:getSessionSets(),notes:notes?notes.value:'',savedAt:new Date().toISOString()};
   lsSet(key,data);
+  // Start session clock once there's any logged data
+  const hasData = data.sets.flat().some(s=>s.done||(s.reps&&s.reps!=='')||(s.weight&&s.weight!==''));
+  if(hasData && !lsGet(getSessionClockKey())) startSessionClock();
   renderWeekStrip();
   updateProgressBar();
   // Sync to cloud in background with retry on failure
