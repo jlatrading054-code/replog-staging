@@ -197,12 +197,16 @@ input,textarea,select{font-family:'Barlow',sans-serif;}
 .set-row{display:grid;grid-template-columns:22px 1fr 1fr 26px;gap:5px;align-items:center;padding:4px 0;border-bottom:1px solid var(--bd);}
 .set-row:last-of-type{border-bottom:none;}
 .sn{font-family:'Barlow Condensed',sans-serif;font-size:11px;color:var(--muted);font-weight:700;text-align:center;}
-.si{background:var(--surface2);border:1px solid var(--bd);border-radius:6px;padding:5px 3px;text-align:center;font-size:13px;color:var(--text);outline:none;width:100%;}
-.si:focus{border-color:var(--accent);}
+.si{background:var(--surface2);border:1px solid var(--bd);border-radius:6px;padding:5px 3px;text-align:center;font-size:13px;color:var(--text);outline:none;width:100%;transition:border-color 0.15s,background 0.15s;}
+.si:focus{border-color:var(--accent);background:var(--surface3);}
 .si:disabled{opacity:0.25;}
+.si::-webkit-inner-spin-button,.si::-webkit-outer-spin-button{-webkit-appearance:none;margin:0;}
+.si{-moz-appearance:textfield;}
 .sc{width:32px;height:32px;border-radius:6px;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all 0.15s;flex-shrink:0;-webkit-tap-highlight-color:transparent;touch-action:manipulation;}
 .sc.done{background:var(--accent);color:#fff;font-size:12px;font-weight:700;}
 .sc.undone{border:1.5px solid var(--bd);}
+.sc:active,.rchip:active,.ex-timer-btn:active,.add-set-btn:active{transform:scale(0.94);}
+.save-btn:active,.onboard-next:active,.auth-btn:active,.load-program-btn:active,.measure-save:active{transform:scale(0.98);}
 .add-set-btn{margin-top:8px;width:100%;background:var(--surface2);border:1px dashed var(--bd);border-radius:6px;color:var(--muted);font-family:'Barlow Condensed',sans-serif;font-size:12px;font-weight:700;letter-spacing:0.05em;padding:7px;text-transform:uppercase;}
 .prev-best{font-size:10px;color:var(--dim);margin-top:6px;text-align:right;}
 .prev-best span{color:var(--accent2);}
@@ -896,7 +900,7 @@ textarea.notes-ta:focus{border-color:var(--accent);}
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.39.0/dist/umd/supabase.js"></script>
 <script>
 // -- CACHE BUST -------------------------------------------------
-const APP_VERSION = 'replog-STAGING-v50';
+const APP_VERSION = 'replog-STAGING-v51';
 if('serviceWorker' in navigator){
   navigator.serviceWorker.getRegistrations().then(regs=>{
     regs.forEach(reg=>{
@@ -1000,7 +1004,10 @@ let isGuest = false;
 // -- STORAGE HELPERS (local fallback for guests) -----------------
 function lsGet(k){ try{ return JSON.parse(localStorage.getItem('rl_'+k)||'null'); }catch(e){return null;} }
 function lsSet(k,v){ localStorage.setItem('rl_'+k, JSON.stringify(v)); }
-function getSessionKey(d){ return 'session_'+(d||currentDate).toISOString().slice(0,10); }
+// Local calendar date (Y-M-D in the device's own timezone) — do NOT use toISOString().slice(0,10)
+// for this, since that converts to UTC first and shifts late-evening entries to the next day.
+function toLocalDateStr(d){ const dt=d||new Date(); const y=dt.getFullYear(); const m=String(dt.getMonth()+1).padStart(2,'0'); const day=String(dt.getDate()).padStart(2,'0'); return `${y}-${m}-${day}`; }
+function getSessionKey(d){ return 'session_'+toLocalDateStr(d||currentDate); }
 
 // -- UNITS ------------------------------------------------------
 let currentUnits = lsGet('units') || 'lbs';
@@ -1011,11 +1018,20 @@ function setUnits(u){
   document.getElementById('btn-lbs').classList.toggle('active', u==='lbs');
   document.getElementById('btn-kg').classList.toggle('active', u==='kg');
   renderToday();
+  if(document.getElementById('statsContent')) renderStats();
 }
 
+// Canonical storage/sync is always lbs (matches the set_logs.weight_lbs column and PR/history
+// math elsewhere). These two only convert at the display/input boundary for the kg toggle.
 function convertWeight(lbs){
-  if(currentUnits==='kg') return lbs ? (parseFloat(lbs)*0.453592).toFixed(1) : '';
+  if(currentUnits==='kg') return (lbs!==''&&lbs!=null) ? (parseFloat(lbs)*0.453592).toFixed(1) : '';
   return lbs;
+}
+
+function weightToLbs(displayVal){
+  if(displayVal==='' || displayVal==null) return '';
+  if(currentUnits==='kg') return (parseFloat(displayVal)/0.453592).toFixed(1);
+  return displayVal;
 }
 
 function weightLabel(){ return currentUnits; }
@@ -1226,8 +1242,12 @@ function continueAsGuest(){
 
 // -- AUTH STATE LISTENER ----------------------------------------
 sb.auth.onAuthStateChange(async (event, session)=>{
+  if(session && session.user) currentUser = session.user;
+  // Only re-run app init on an actual sign-in / first load. Supabase also fires this
+  // listener on TOKEN_REFRESHED (~hourly) and USER_UPDATED — reacting to those re-renders
+  // the whole app mid-workout and can silently drop an unsaved (not-yet-blurred) input.
+  if(event !== 'SIGNED_IN' && event !== 'INITIAL_SESSION') return;
   if(session && session.user){
-    currentUser = session.user;
     isGuest = false;
     const hasProgram = lsGet('activeProgram');
     const hasOnboard = lsGet('onboarded');
@@ -1344,7 +1364,7 @@ async function importProgram(){
   document.getElementById('step-building').classList.add('active');
   document.getElementById('buildingMsg').textContent='Coach Rep is reading your program…';
 
-  const wantAnalysis = onboardData.want_analysis !== 'No - load as-is';
+  const wantAnalysis = onboardData.want_analysis !== 'No — load as-is';
   const duration = onboardData.program_duration || 'unknown duration';
 
   const prompt = `You are Coach Rep inside the RepLog fitness app. A user has provided their existing workout program. Your job is to:
@@ -1842,13 +1862,24 @@ function renderToday(){
   }
 
   html+=`<div class="ex-section">`;
+  // Land the user directly on the next thing to do instead of six collapsed rows —
+  // auto-expand the first exercise that isn't fully logged yet.
+  let autoOpenEi=-1;
+  if(!isComplete){
+    for(const ex of [...mainEx, ...coreEx]){
+      const ei=exercises.indexOf(ex);
+      const exSets=saved.sets&&saved.sets[ei]?saved.sets[ei]:Array.from({length:ex.default_sets||3});
+      const doneCount=exSets.filter(s=>s&&s.done).length;
+      if(doneCount<exSets.length){ autoOpenEi=ei; break; }
+    }
+  }
   if(mainEx.length>0){
     html+=`<div class="sec-lbl">Main work</div>`;
-    mainEx.forEach((ex,i)=>{ html+=renderExBlock(ex, exercises.indexOf(ex), saved); });
+    mainEx.forEach((ex,i)=>{ const ei=exercises.indexOf(ex); html+=renderExBlock(ex, ei, saved, ei===autoOpenEi); });
   }
   if(coreEx.length>0){
     html+=`<div class="sec-lbl core">Core finisher</div>`;
-    coreEx.forEach((ex,i)=>{ html+=renderExBlock(ex, exercises.indexOf(ex), saved); });
+    coreEx.forEach((ex,i)=>{ const ei=exercises.indexOf(ex); html+=renderExBlock(ex, ei, saved, ei===autoOpenEi); });
   }
   html+=`</div>`;
   html+=`<div class="notes-wrap"><div class="notes-lbl">Session notes</div><textarea class="notes-ta" id="sessionNotes" placeholder="How did it feel? Any PRs? Notes on form…" onblur="autoSave()">${saved.notes||''}</textarea></div>`;
@@ -1858,7 +1889,7 @@ function renderToday(){
   if(!isComplete) resumeSessionClockIfRunning(); else stopSessionClock();
 }
 
-function renderExBlock(ex, ei, saved){
+function renderExBlock(ex, ei, saved, autoOpen){
   const defaultSets=ex.default_sets||3;
   const defaultReps=ex.default_reps||'';
   const savedSets=saved.sets&&saved.sets[ei]?saved.sets[ei]:Array.from({length:defaultSets},()=>({reps:defaultReps,weight:'',done:false}));
@@ -1866,7 +1897,6 @@ function renderExBlock(ex, ei, saved){
   const allDone=doneCount>=savedSets.length&&savedSets.length>0;
   const isBW=ex.unit==='bw';
   const colLabel=ex.unit==='mins'?'Mins':ex.unit==='secs'?'Secs':'Reps';
-  const prevBest=getPrevBest(ex.name);
   const timerBtn=ex.is_timed?`<button class="ex-timer-btn" onclick="event.stopPropagation();(function(){const inp=document.querySelector('#sets-${ei} .set-row input[type=number]');const val=inp&&inp.value&&parseInt(inp.value)>0?parseInt(inp.value):${ex.default_reps||30};launchExTimer(val,'${ex.name.replace(/'/g,"\\'")}');})()">&blacktriangleright; Timer</button>`:'';
   const pillClass=allDone?'sets-done':'sets-partial';
   const pillText=allDone?`${savedSets.length}/${savedSets.length} ✓`:doneCount>0?`${doneCount}/${savedSets.length}`:'';
@@ -1881,7 +1911,7 @@ function renderExBlock(ex, ei, saved){
     <a class="eip-demo" href="https://www.youtube.com/results?search_query=${encodeURIComponent(ex.name+' exercise form')}" target="_blank">▶ Watch demo</a>
   </div>` : '';
 
-  let b=`<div class="ex-block${ex.is_core?' core-ex':''}${allDone?' done-ex':''}" id="ex-${ei}">
+  let b=`<div class="ex-block${ex.is_core?' core-ex':''}${allDone?' done-ex':''}${autoOpen?' open':''}" id="ex-${ei}">
     <div class="ex-hd" onclick="toggleEx(${ei})">
       <div><div class="ex-name">${ex.name}</div><div class="ex-note">${ex.note||''}</div></div>
       <div class="ex-right">${infoBtn}${timerBtn}${pillText?`<div class="sets-pill ${pillClass}">${pillText}</div>`:''}<div class="chev">&#8964;</div></div>
@@ -1891,13 +1921,20 @@ function renderExBlock(ex, ei, saved){
   b+=`<div class="set-hds"><div class="set-hd"></div><div class="set-hd">${colLabel}</div><div class="set-hd">${isBW?'BW':weightLabel()}</div><div class="set-hd">&#10003;</div></div>
     <div id="sets-${ei}">`;
   savedSets.forEach((s,si)=>{
-    const lastW = lastWeights && lastWeights[si] ? lastWeights[si] : '';
+    const lastW = lastWeights && lastWeights[si] ? convertWeight(lastWeights[si]) : '';
     const weightPlaceholder = lastW ? `last: ${lastW}` : (isBW?'BW':weightLabel());
-    b+=`<div class="set-row"><div class="sn">${si+1}</div><input class="si" type="number" value="${s.reps}" placeholder="-" min="0" onblur="autoSave()"><input class="si" type="number" value="${s.weight}" placeholder="${weightPlaceholder}" min="0" ${isBW?'disabled':''} onblur="autoSave()"><div class="sc ${s.done?'done':'undone'}" onclick="event.stopPropagation();toggleDone(${ei},${si},this)">${s.done?'✓':''}</div></div>`;
+    b+=`<div class="set-row"><div class="sn">${si+1}</div><input class="si" type="number" value="${s.reps}" placeholder="-" min="0" onblur="autoSave()"><input class="si" type="number" value="${isBW?s.weight:convertWeight(s.weight)}" placeholder="${weightPlaceholder}" min="0" ${isBW?'disabled':''} onblur="autoSave()"><div class="sc ${s.done?'done':'undone'}" onclick="event.stopPropagation();toggleDone(${ei},${si},this)">${s.done?'✓':''}</div></div>`;
   });
   b+=`</tbody>
     <button class="add-set-btn" onclick="addSet(${ei},event)">+ Add set</button>
-  </div></div>`;
+    <div class="rest-row">
+      <div class="rest-lbl">Rest</div>
+      <div class="rchip" onclick="launchRestTimer(60)">1 min</div>
+      <div class="rchip" onclick="launchRestTimer(90)">90s</div>
+      <div class="rchip" onclick="launchRestTimer(120)">2 min</div>
+      <div class="rchip" onclick="launchRestTimer(180)">3 min</div>
+    </div>
+  </div></div></div>`;
   return b;
 }
 
@@ -1947,24 +1984,6 @@ function addSet(ei,e){
   container.appendChild(div);
 }
 
-function getPrevBest(exName){
-  const keys=Object.keys(localStorage).filter(k=>k.startsWith('rl_session_'));
-  let best=null;
-  keys.forEach(k=>{
-    try{
-      const session=JSON.parse(localStorage.getItem(k));
-      if(!session||!session.sets) return;
-      session.sets.forEach(sets=>{
-        if(!Array.isArray(sets)) return;
-        sets.forEach(s=>{
-          if(s.weight&&parseFloat(s.weight)>0&&(!best||parseFloat(s.weight)>parseFloat(best.weight))) best=s;
-        });
-      });
-    }catch(e){}
-  });
-  return best?`${best.weight} lb × ${best.reps}`:null;
-}
-
 // Get last session's per-set weights for a specific exercise (matched by name within day plans)
 function getLastSetWeights(exName){
   const keys=Object.keys(localStorage)
@@ -2003,10 +2022,12 @@ function getSessionSets(){
   if(!dayPlan||!dayPlan.exercises) return [];
   return dayPlan.exercises.map((ex,ei)=>{
     const rows=document.querySelectorAll(`#sets-${ei} .set-row`);
+    const isBW=ex.unit==='bw';
     return Array.from(rows).map(row=>{
       const inputs=row.querySelectorAll('input');
       const sc=row.querySelector('.sc');
-      return{reps:inputs[0]?inputs[0].value:'',weight:inputs[1]?inputs[1].value:'',done:sc?sc.classList.contains('done'):false};
+      const rawWeight=inputs[1]?inputs[1].value:'';
+      return{reps:inputs[0]?inputs[0].value:'',weight:isBW?rawWeight:weightToLbs(rawWeight),done:sc?sc.classList.contains('done'):false};
     });
   });
 }
@@ -2014,7 +2035,7 @@ function getSessionSets(){
 // -- MEASUREMENTS -----------------------------------------------
 function openMeasurements(){
   document.getElementById('measureModal').classList.add('open');
-  const today = new Date().toISOString().slice(0,10);
+  const today = toLocalDateStr();
   const existing = lsGet('measurement_'+today);
   if(existing){
     ['weight','bodyfat','waist','chest','hips','arms','thighs','neck'].forEach(f=>{
@@ -2031,7 +2052,7 @@ function closeMeasurements(){
 }
 
 function saveMeasurements(){
-  const today = new Date().toISOString().slice(0,10);
+  const today = toLocalDateStr();
   const data = {
     date: today,
     weight: document.getElementById('m-weight').value,
@@ -2064,7 +2085,7 @@ function checkMeasurementReminder(){
   const measurements = getMeasurements();
   const today = new Date();
   if(measurements.length === 0){
-    if(!lsGet('onboarded_date')) lsSet('onboarded_date', today.toISOString().slice(0,10));
+    if(!lsGet('onboarded_date')) lsSet('onboarded_date', toLocalDateStr(today));
     // Only nudge for baseline if not recently dismissed
     const dismissedAt = lsGet('baseline_nudge_dismissed');
     if(dismissedAt){
@@ -2125,7 +2146,7 @@ function checkWeeklyPlanningNeeded(){
   const lastCheckin = lsGet('last_weekly_checkin');
   const thisMonday = new Date(today);
   thisMonday.setHours(0,0,0,0);
-  const thisMondayStr = thisMonday.toISOString().slice(0,10);
+  const thisMondayStr = toLocalDateStr(thisMonday);
 
   if(lastCheckin === thisMondayStr) return; // Already done this week
   lsSet('last_weekly_checkin', thisMondayStr);
@@ -2433,7 +2454,22 @@ async function migratGuestDataToCloud(){
 
     for(const key of sessionKeys){
       const session = lsGet(key);
-      if(session) await syncSessionToCloud(key.replace('session_',''), session);
+      if(!session) continue;
+      const dateKey = key.replace('session_','');
+      // Don't blindly overwrite cloud data with this device's local copy — the local copy
+      // may just be a mirror pulled down earlier by loadSessionsFromCloud, or another device
+      // may have logged newer sets since. Only push if this device's data is actually newer.
+      const { data: existing } = await sb.from('session_logs')
+        .select('updated_at, created_at')
+        .eq('user_id', currentUser.id)
+        .eq('logged_date', dateKey)
+        .maybeSingle();
+      if(existing){
+        const cloudTime = new Date(existing.updated_at || existing.created_at);
+        const localTime = new Date(session.savedAt || 0);
+        if(cloudTime >= localTime) continue;
+      }
+      await syncSessionToCloud(dateKey, session);
     }
     console.log('Guest data migrated to cloud');
   } catch(e){
@@ -2475,7 +2511,7 @@ function saveWithFeedback(btn){
 let sessionClockInterval = null;
 
 function getSessionClockKey(){
-  return 'clock_'+currentDate.toISOString().slice(0,10);
+  return 'clock_'+toLocalDateStr(currentDate);
 }
 
 function startSessionClock(){
@@ -2525,7 +2561,7 @@ function autoSave(){
   renderWeekStrip();
   updateProgressBar();
   // Sync to cloud in background with retry on failure
-  const dateKey = currentDate.toISOString().slice(0,10);
+  const dateKey = toLocalDateStr(currentDate);
   syncWithRetry(dateKey, data);
 }
 
@@ -2685,7 +2721,7 @@ function renderStats(){
   let streak=0;
   for(let i=0;i<365;i++){
     const d=new Date(today); d.setDate(today.getDate()-i);
-    const key='rl_session_'+d.toISOString().slice(0,10);
+    const key='rl_session_'+toLocalDateStr(d);
     const session=lsGet(key.replace('rl_',''));
     if(session&&session.sets){
       const done=session.sets.flat().filter(s=>s.done).length;
@@ -2815,7 +2851,7 @@ function renderStats(){
           <div class="pr-nm">${name}</div>
           <div style="font-size:10px;color:var(--dim)">${months[d.getMonth()]} ${d.getDate()}</div>
         </div>
-        <div class="pr-wt">${pr.weight} <span>${weightLabel()} × ${pr.reps}</span></div>
+        <div class="pr-wt">${convertWeight(pr.weight)} <span>${weightLabel()} × ${pr.reps}</span></div>
       </div>`;
     });
     html+=`</div>`;
@@ -2963,7 +2999,7 @@ function renderExChart(exName, history){
       svg+=`<text x="${p.x.toFixed(1)}" y="${H+14}" text-anchor="middle" font-size="8" fill="#7a8ba0" font-family="sans-serif">${months[d.getMonth()]} ${d.getDate()}</text>`;
     }
     if(i===pts.length-1){
-      svg+=`<text x="${p.x.toFixed(1)}" y="${(p.y-8).toFixed(1)}" text-anchor="middle" font-size="10" fill="#CC2936" font-family="sans-serif" font-weight="bold">${p.w}${weightLabel()}</text>`;
+      svg+=`<text x="${p.x.toFixed(1)}" y="${(p.y-8).toFixed(1)}" text-anchor="middle" font-size="10" fill="#CC2936" font-family="sans-serif" font-weight="bold">${convertWeight(p.w)}${weightLabel()}</text>`;
     }
   });
   svg+=`</svg>`;
