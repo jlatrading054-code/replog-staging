@@ -900,7 +900,7 @@ textarea.notes-ta:focus{border-color:var(--accent);}
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.39.0/dist/umd/supabase.js"></script>
 <script>
 // -- CACHE BUST -------------------------------------------------
-const APP_VERSION = 'replog-STAGING-v51';
+const APP_VERSION = 'replog-STAGING-v52';
 if('serviceWorker' in navigator){
   navigator.serviceWorker.getRegistrations().then(regs=>{
     regs.forEach(reg=>{
@@ -3089,6 +3089,95 @@ function sendSuggestion(el){
   sendMessage();
 }
 
+// Ground Coach Rep in the user's actual logged numbers instead of just profile text and
+// session-completion counts, so it can reference real PRs, spot plateaus, and know the plan.
+function buildCoachContext(){
+  const sessionKeys=Object.keys(localStorage).filter(k=>k.startsWith('rl_session_')).sort();
+
+  const prs={};      // {exName: {weight, reps, date}}
+  const history={};  // {exName: [{date, weight}]}
+  sessionKeys.forEach(k=>{
+    const session=lsGet(k.replace('rl_',''));
+    if(!session||!session.sets) return;
+    const dateStr=k.replace('rl_session_','');
+    const dow=new Date(dateStr+'T12:00:00').getDay();
+    const dayPlan=activeProgram&&activeProgram.days.find(p=>p.day_of_week===dow);
+    if(!dayPlan) return;
+    (dayPlan.exercises||[]).forEach((ex,ei)=>{
+      const sets=session.sets[ei]||[];
+      sets.forEach(s=>{
+        if(s.weight&&parseFloat(s.weight)>0){
+          const w=parseFloat(s.weight);
+          if(!prs[ex.name]||w>parseFloat(prs[ex.name].weight)) prs[ex.name]={weight:s.weight,reps:s.reps,date:dateStr};
+          if(!history[ex.name]) history[ex.name]=[];
+          history[ex.name].push({date:dateStr,weight:w});
+        }
+      });
+    });
+  });
+
+  const prLines=Object.entries(prs)
+    .sort((a,b)=>new Date(b[1].date)-new Date(a[1].date))
+    .slice(0,10)
+    .map(([name,pr])=>`${name}: PR ${pr.weight} lb x ${pr.reps} (${pr.date})`);
+
+  const trendLines=[];
+  Object.entries(history).forEach(([name,pts])=>{
+    const byDate={};
+    pts.forEach(p=>{ if(!byDate[p.date]||p.weight>byDate[p.date]) byDate[p.date]=p.weight; });
+    const sorted=Object.entries(byDate).sort((a,b)=>a[0].localeCompare(b[0]));
+    if(sorted.length<2) return;
+    const last=sorted[sorted.length-1][1], prev=sorted[sorted.length-2][1];
+    if(last>prev) trendLines.push(`${name}: trending up (${prev} -> ${last} lb)`);
+    else if(last<prev) trendLines.push(`${name}: dropped (${prev} -> ${last} lb)`);
+    else if(sorted.length>=3 && sorted[sorted.length-3][1]===last) trendLines.push(`${name}: plateaued at ${last} lb for ${sorted.length} sessions`);
+  });
+
+  const dow=currentDate.getDay();
+  const todayPlan=activeProgram&&activeProgram.days.find(d=>d.day_of_week===dow);
+  const todayLine=todayPlan&&todayPlan.type!=='rest'
+    ? `${todayPlan.name}: ${(todayPlan.exercises||[]).map(e=>e.name).join(', ')}`
+    : 'Rest day';
+
+  const today=new Date();
+  const weekStart=new Date(today); weekStart.setDate(today.getDate()-today.getDay());
+  const sessionsThisWeek=sessionKeys.filter(k=>new Date(k.replace('rl_session_','')+'T12:00:00')>=weekStart).length;
+
+  let streak=0;
+  for(let i=0;i<365;i++){
+    const d=new Date(today); d.setDate(today.getDate()-i);
+    const s=lsGet('session_'+toLocalDateStr(d));
+    if(s&&s.sets){
+      const done=s.sets.flat().filter(x=>x.done).length;
+      const total=s.sets.flat().length;
+      if(done>0&&done>=total) streak++;
+      else if(i>0) break;
+    } else if(i>0) break;
+  }
+
+  const measurements=getMeasurements();
+  let measureLine='No measurements logged';
+  if(measurements.length>=2){
+    const first=measurements[0], latest=measurements[measurements.length-1];
+    if(first.weight&&latest.weight){
+      const delta=(parseFloat(latest.weight)-parseFloat(first.weight)).toFixed(1);
+      measureLine=`Body weight: ${latest.weight} lb (${delta>=0?'+':''}${delta} lb since ${first.date})`;
+    }
+  } else if(measurements.length===1 && measurements[0].weight){
+    measureLine=`Baseline logged: ${measurements[0].weight} lb on ${measurements[0].date}`;
+  }
+
+  return `Today's workout: ${todayLine}
+Current streak: ${streak} day(s) | Sessions this week: ${sessionsThisWeek}/${onboardData.days||5}
+${measureLine}
+
+Personal records (most recent first):
+${prLines.length?prLines.join('\n'):'No weights logged yet'}
+
+Performance trends:
+${trendLines.length?trendLines.join('\n'):'Not enough data yet for trends'}`;
+}
+
 async function sendMessage(){
   const input=document.getElementById('chatInput');
   const msg=input.value.trim();
@@ -3100,16 +3189,7 @@ async function sendMessage(){
   const typing=addTyping();
 
   // Build context for Coach Rep
-  const recentSessions=Object.keys(localStorage)
-    .filter(k=>k.startsWith('rl_session_'))
-    .sort().slice(-7)
-    .map(k=>{
-      const s=lsGet(k.replace('rl_',''));
-      if(!s) return null;
-      const done=s.sets?s.sets.flat().filter(x=>x.done).length:0;
-      const total=s.sets?s.sets.flat().length:0;
-      return `${k.replace('rl_session_','')}: ${done}/${total} sets completed`;
-    }).filter(Boolean).join('\n');
+  const performanceSummary = buildCoachContext();
 
   const shiftInfo = onboardData.shift_schedule && onboardData.shift_schedule !== 'No shift work'
     ? `Shift schedule: ${onboardData.shift_schedule}${onboardData.shift_start_date ? ', next shift: '+onboardData.shift_start_date : ''}`
@@ -3138,13 +3218,19 @@ User profile:
 - Training style: ${onboardData.training_style||'balanced'}
 - Notes: ${onboardData.other_notes||'none'}
 
-Recent training sessions:
-${recentSessions||'No sessions logged yet'}
+Actual training data (use this to coach with specifics, not generic advice):
+${performanceSummary}
+
+When you reference progress, cite the real numbers above - name the exercise and the actual weight, not vague encouragement. Call out plateaus directly and suggest a concrete fix (deload, rep range change, technique check) rather than just cheering the user on. Celebrate genuine PRs and streaks specifically. If there's no data yet for something, say so rather than inventing it.
 
 When the user tells you their schedule changed, they want different training days, or any profile info changes - update it with JSON_PROFILE and confirm what changed. Keep responses concise and actionable. Be real, not corporate.`;
 
+  // Cap what we send the model to the most recent messages - full history still lives in
+  // localStorage/cloud for display, but an ever-growing transcript just burns tokens and cost.
+  const historyForApi = conversationHistory.slice(-20);
+
   try{
-    const data=await callCoachRep(conversationHistory, systemPrompt, 4000, true);
+    const data=await callCoachRep(historyForApi, systemPrompt, 4000, true);
     const response = data.content ? data : (data.data || data);
     let reply = response.content.filter(c=>c.type==='text').map(c=>c.text).join('');
 
